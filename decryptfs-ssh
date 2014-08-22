@@ -1,0 +1,275 @@
+#!/bin/bash
+###############################################################################
+#
+#  decryptfs-ssh - Automatic ecryptfs mounting for SSH key logins
+#
+#  Version:
+#
+#    0.1 beta
+#
+#  License:
+#
+#     GNU General Public Licence v3
+#
+#  Authors:
+#
+#    Bjørn Danielsen <bjornnd@gmail.com>
+#
+#  Acknowledgements:
+#
+#    kasperd <p@2012.kasperd.net>
+#      Original idea - found at http://serverfault.com/questions/622344
+#
+#  Notes:
+#
+#    Run without arguments for usage. No warrany - no guarantees! :)
+#
+###############################################################################
+
+###
+#  Configuration:
+#
+
+# Authorized keys file for the current user
+AUTHORIZED_KEYS=/etc/ssh/$USER/authorized_keys
+
+# Folder for ssh-wrapped passwords for the current user
+WRAPPED_PASSES=/etc/ssh/$USER/ecryptfs-ssh-wraps
+
+# Shell to use when logging in
+SSH_USER_SHELL=/bin/bash
+
+# Script location
+SCRIPT_LOC=/etc/ssh
+
+###############################################################################
+# usage()
+#
+# Display usage information
+#
+function usage() {
+	echo
+	echo "  decryptfs-ssh v0.1 beta "
+	echo
+	echo "  SSH-keys to be used must be both in the users authorized keys and loaded"
+    echo "  by ssh-agent for the current session for this script to work properly."
+	echo
+	echo "  Automation:"
+	echo
+	echo "    This script must be run either through the users authorized_keys entry"
+	echo "    or via the ForceCommand option in sshd_config. Examples:"
+	echo
+	echo "    In authorized_keys (for specific users):"
+	echo
+	echo "      command=\"/etc/ssh/decryptfs-ssh start\" ssh-rsa AA....oJw= user@example.com"
+	echo
+	echo "    In sshd_config (for all users):"
+	echo
+	echo "      ForceCommand \"/etc/ssh/decryptfs-ssh start\""
+	echo
+	echo "  Manual usage:"
+	echo
+	echo "    Enable automatic decryption for a key:"
+	echo "      decryptfs-ssh enable <user@example.com>"
+	echo
+	echo "    Decrypt home folder with a specified key:"
+	echo "      decryptfs-ssh decrypt <user@example.com>"
+	echo
+	echo "    Recrypt folder for the current account:"
+	echo "      decryptfs-ssh recrypt"
+	echo
+	echo "    Disable automatic decryption for a key:"
+	echo "      decryptfs-ssh disable <user@example.com>"
+	echo
+}
+
+###############################################################################
+# getpubkey(ssh-key-email)
+#
+# Retrieve just the key string from an authorized ssh key on
+# the specified account
+#
+function getpubkey() {
+	grep $1 $AUTHORIZED_KEYS | sed -e 's/.*ssh-rsa //;s/ .*//'
+}
+
+###############################################################################
+# enable(ssh-key-email)
+#
+# Enable automatic ecryptfs decryption for an autorized
+# ssh key on the specified account.
+#
+function enable() {
+	if [ ! -f $AUTHORIZED_KEYS ]; then
+		echo "Error: $AUTHORIZED_KEYS not found"
+		exit 1
+	fi
+	grep -q $1 $AUTHORIZED_KEYS
+	if [ "$?" == "1" ]; then
+		echo "Error: $1 not found in $AUTHORIZED_KEYS"
+		exit 1
+	fi
+	echo "Enter login passphrase for $USER: "
+	UNWRAPPED=$(ecryptfs-unwrap-passphrase $HOME/.ecryptfs/wrapped-passphrase | tail -1)
+	if [ $? != 0 ]; then
+		echo "Error: Wrong passphrase for $USER"
+		exit 1
+	fi
+	PUBKEY=$(getpubkey $1)
+	SSHPHRASE=$($SCRIPT_LOC/decryptfs-ssh-agent.py $PUBKEY $1)
+	mkdir -p $WRAPPED_PASSES
+	printf "%s\n%s" "$UNWRAPPED" "$SSHPHRASE" | ecryptfs-wrap-passphrase $WRAPPED_PASSES/$1
+
+	echo "Enabled automatic decryption of $HOME for $1"
+}
+
+###############################################################################
+# decrypt(ssh-email)
+#
+# Decrypt the home folder for the specified account with
+# an authorized ssh-key.
+#
+function decrypt() {
+	cd $HOME/..
+	echo "Attempting to mount $HOME with $1"
+	if [ -f $WRAPPED_PASSES/$1 ]; then
+		PUBKEY=`getpubkey $1`
+		UNWRAP=$($SCRIPT_LOC/decryptfs-ssh-agent.py "$PUBKEY" "$1")
+		OUTPUT=$($SCRIPT_LOC/decryptfs-ssh-agent.py "$PUBKEY" "$1" |
+			ecryptfs-unwrap-passphrase "$WRAPPED_PASSES/$1" - |
+			ecryptfs-add-passphrase --fnek)
+
+		/usr/bin/ecryptfs-mount-private
+		if [ "$?" == "0" ]; then
+			echo "Mounted $HOME with $1"
+			cd $HOME
+		fi
+	fi
+}
+
+###############################################################################
+# recrypt()
+#
+# Remove decryption for the home folder for the current user
+#
+function recrypt() {
+	cd $HOME/..
+	/usr/bin/ecryptfs-umount-private
+    if mount | grep $HOME/.Private > /dev/null; then
+		echo "$HOME left open!"
+	else
+		echo "Recrypted $HOME"
+	fi
+}
+
+###############################################################################
+# disable(ssh-email)
+#
+# Disable automatic decryption for the specified ssh key on
+# the current account.
+#
+function disable() {
+	if [ ! -f $WRAPPED_PASSES/$1 ]; then
+		echo "$1 not found in $WRAPPED_PASSES"
+		exit 1
+	fi
+	rm $WRAPPED_PASSES/$1
+	echo "Disabled automatic decryption for $1"
+}
+
+###############################################################################
+# start()
+#
+# Start a session for the SSH user and attempt to decrypt the home folder
+# if possible.
+#
+function start() {
+	# Make sure the home folder is actually encrypted
+	if [ -f $HOME/Private ]; then
+		echo "Notice: $HOME already decrypted"
+		exit 0
+	fi
+	if [ ! -d $HOME/.ecryptfs ]; then
+		echo "Notice: $HOME not encrypted with ecryptfs"
+		exit 0
+	fi
+	# Try available keys until a match is found
+	while read trykey; do
+		decrypt $trykey
+
+		# Dir set to $HOME if mounted ok
+	    if [ "$PWD" == "$HOME" ]; then
+	        break
+	    fi
+    done < <( ssh-add -l | awk '{print$3}')
+
+    if [ "$PWD" != "$HOME" ]; then
+    	echo "Warning: decryptfs-ssh was unable to find a key that allows"
+    	echo "         automatic mounting of your ecryptfs home folder."
+
+	    if mount | grep $HOME/.Private > /dev/null; then
+		    echo "         However, the $HOME was already decrypted!"
+		else
+		    echo "         Hint: decryptfs-ssh enable user@example.com"
+		fi	    
+	    echo
+	fi
+
+    # Verify mounting
+    if mount | grep $HOME/.Private > /dev/null; then
+		if [ "$SSH_ORIGINAL_COMMAND" != "" ]; then
+		    $SSH_USER_SHELL -c "$SSH_ORIGINAL_COMMAND"
+		fi
+
+		# Start user session
+		$SSH_USER_SHELL
+
+		recrypt
+        exit 0
+    fi
+
+    # Allow the user to decrypt manually
+    exec $SSH_USER_SHELL
+    exit 0
+}
+
+###############################################################################
+# Process command line arguments
+#
+case $1 in
+
+	enable)
+		if [ -z $2 ]; then
+			echo "Error: Missing ssh-key-email parameter"
+			usage
+			exit 1
+		fi
+		enable $2
+	;;
+	decrypt)
+		if [ -z $2 ]; then
+			echo "Error: Missing ssh-key-email parameter"
+			usage
+			exit 1
+		fi
+		decrypt $2
+	;;
+	recrypt)
+		recrypt 
+	;;
+	disable)
+		if [ -z $2 ]; then
+			echo "Error: Missing ssh-key-email parameter"
+			usage
+			exit 1
+		fi
+		disable $2
+	;;
+	start)
+		start
+	;;
+	*)
+	usage
+esac
+
+exit 0

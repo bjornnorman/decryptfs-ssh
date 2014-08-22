@@ -1,7 +1,16 @@
 #!/usr/bin/env python
+###############################################################################
 #
-# Original author: kasperd at kasperd.net
-# Code found at http://serverfault.com/questions/622344
+#  decryptfs-ssh-agent - Sign a passphrase using the ssh agent
+#
+#  License:
+#
+#    GNU General Public License v3
+#
+#  Author:
+#
+#    kasperd at kasperd.net
+#    (Code found at http://serverfault.com/questions/622344)
 #
 
 from sys import argv

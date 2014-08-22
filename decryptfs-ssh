@@ -173,7 +173,7 @@ function disable() {
 		echo "$1 not found in $WRAPPED_PASSES"
 		exit 1
 	fi
-	rm $WRAPPED_PASSES/$1
+	shred -uz $WRAPPED_PASSES/$1
 	echo "Disabled automatic decryption for $1"
 }
 

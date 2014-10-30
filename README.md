@@ -3,6 +3,12 @@ decryptfs-ssh
 
 Solution for automatic decryption of ecryptfs home folders when logging in with SSH keys without password.
 
+# Background 
+
+The fact that you have to enter your password to decrypt your home folder 
+when logging in through SSH with keys sort of defeats the purpose of using 
+keys for logins... You still have to remember and type your password!
+
 # General information
 
 SSH-keys to be used must be both in the users authorized keys and loaded
